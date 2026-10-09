@@ -926,30 +926,30 @@ tbody tr.overdue td:first-child{box-shadow:inset 3px 0 0 #e04b4b}
         </div>
       </div>
 
-      <div class="settings-divider"><span>☁️ 远程同步（JSONBin）</span></div>
+      <div class="settings-divider"><span>☁️ 云同步（GitHub 私有仓库）</span></div>
       <p style="margin:0 0 12px;font-size:12.5px;color:#8a93a6;line-height:1.8">
-        通过 <b>JSONBin.io</b> 免费服务实现「远程数据库」效果：先在 <a href="https://jsonbin.io" target="_blank" style="color:#3b6df6">jsonbin.io</a> 注册并获取 Master Key，粘贴到下面，点「创建新 Bin」，之后所有数据可上传/下载，多设备共享。
+        数据存在你的 <b>GitHub 私有仓库</b>里，手机电脑打开同一网址即可同步。首次使用：粘贴 GitHub Token → 点「创建数据仓库」→ 打开自动同步。Token 只保存在本设备浏览器中，不会上传。
       </p>
       <div class="form-grid">
         <div class="field full">
-          <label for="set_remoteKey">JSONBin Master Key</label>
-          <input type="text" id="set_remoteKey" placeholder="$2a$10$xxxxxxxxxxxxxxxx" autocomplete="off">
+          <label for="set_remoteKey">GitHub Token</label>
+          <input type="password" id="set_remoteKey" placeholder="github_pat_… 或 ghp_…" autocomplete="off">
         </div>
         <div class="field full">
-          <label for="set_remoteBin">Bin ID</label>
-          <input type="text" id="set_remoteBin" placeholder="点下方按钮自动创建，或粘贴已有 Bin ID" autocomplete="off">
+          <label for="set_remoteBin">数据仓库名<span class="hint">默认 notepad-data，自动创建（私有）</span></label>
+          <input type="text" id="set_remoteBin" placeholder="notepad-data" autocomplete="off">
         </div>
         <div class="field full" style="flex-direction:row;gap:8px;flex-wrap:wrap">
-          <button type="button" class="btn btn-ghost" id="btnRemoteCreate">🔨 创建新 Bin</button>
-          <button type="button" class="btn btn-ghost" id="btnRemoteUpload">⬆️ 上传到远程</button>
-          <button type="button" class="btn btn-ghost" id="btnRemoteDownload">⬇️ 从远程下载</button>
+          <button type="button" class="btn btn-ghost" id="btnRemoteCreate">🔨 创建数据仓库</button>
+          <button type="button" class="btn btn-ghost" id="btnRemoteUpload">⬆️ 上传到云端</button>
+          <button type="button" class="btn btn-ghost" id="btnRemoteDownload">⬇️ 从云端合并</button>
         </div>
         <div class="field full">
           <label>自动同步</label>
           <label class="switch-row blue" for="set_remoteAuto">
             <input type="checkbox" id="set_remoteAuto">
             <span class="switch"></span>
-            <span class="switch-text" id="set_remoteAutoText">保存时自动上传到远程</span>
+            <span class="switch-text" id="set_remoteAutoText">打开页面自动合并云端，保存时自动上传</span>
           </label>
         </div>
       </div>
@@ -1366,40 +1366,89 @@ async function bindLocalFile(){
 }
 
 /* =========================================================
-   ★ 远程同步（JSONBin.io）
+   ★ 云同步（GitHub 私有仓库 Contents API）
    ========================================================= */
-async function createRemoteBin(){
-  var key = $('#set_remoteKey').value.trim();
-  if(!key){ toast('请先填写 JSONBin Master Key'); return; }
+var GH_OWNER = 'xioalv666666';
+var GH_REPO_DEFAULT = 'notepad-data';
+var GH_FILE = 'data.json';
+var syncingNow = false;
+
+function ghApi(){
+  return 'https://api.github.com/repos/' + GH_OWNER + '/' + (settings.remoteBin||GH_REPO_DEFAULT) + '/contents/' + GH_FILE;
+}
+function ghHeaders(extra){
+  return Object.assign({
+    'Accept': 'application/vnd.github+json',
+    'Authorization': 'Bearer ' + (settings.remoteKey||'')
+  }, extra||{});
+}
+function ghEncode(obj){
+  return btoa(unescape(encodeURIComponent(JSON.stringify(obj))));
+}
+function ghDecode(b64){
+  try{ return JSON.parse(decodeURIComponent(escape(atob(String(b64||'').replace(/\n/g,''))))); }
+  catch(e){ return null; }
+}
+function buildPayload(){
+  return { records: records, trash: trash, updatedAt: Date.now() };
+}
+/* 合并云端数据到本地：并集；同一条以「已结算」的为准；对方删除的本地也删除 */
+function mergeData(payload){
+  var changed = false;
   try{
-    var res = await fetch('https://api.jsonbin.io/v3/b', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Master-Key': key,
-        'X-Bin-Name': '某某出行推广记事本',
-        'X-Bin-Private': 'true'
-      },
-      body: JSON.stringify({
-        records: records,
-        settings: {
-          monthGoal: settings.monthGoal,
-          overdueDays: settings.overdueDays,
-          churnDays: settings.churnDays
-        },
-        createdAt: Date.now()
-      })
+    var remoteTrash = Array.isArray(payload.trash) ? payload.trash : [];
+    var trashIds = {};
+    trash.forEach(function(t){ trashIds[t.id] = true; });
+    remoteTrash.forEach(function(rt){
+      if(rt && rt.id && !trashIds[rt.id]){ trash.push(rt); trashIds[rt.id] = true; changed = true; }
     });
-    var data = await res.json();
-    if(!res.ok) throw new Error((data && data.message) || '创建失败');
-    var binId = data.metadata && data.metadata.id;
-    if(!binId) throw new Error('返回数据异常');
-    settings.remoteKey = key;
-    settings.remoteBin = binId;
+
+    var localById = {};
+    records.forEach(function(r){ localById[r.id] = r; });
+    (payload.records||[]).forEach(function(rr){
+      rr = normalize(rr);
+      var lr = localById[rr.id];
+      if(!lr){ records.push(rr); localById[rr.id] = rr; changed = true; }
+      else if(rr.settled && !lr.settled){
+        for(var i=0;i<records.length;i++){
+          if(records[i].id===rr.id){ records[i] = rr; break; }
+        }
+        changed = true;
+      }
+    });
+
+    var before = records.length;
+    records = records.filter(function(r){ return !trashIds[r.id]; });
+    if(records.length !== before) changed = true;
+  }catch(e){ console.error(e); }
+  return changed;
+}
+
+async function createRemoteBin(){
+  var token = $('#set_remoteKey').value.trim();
+  if(!token){ toast('请先填写 GitHub Token'); return; }
+  var repoName = $('#set_remoteBin').value.trim() || GH_REPO_DEFAULT;
+  try{
+    var res = await fetch('https://api.github.com/repos/' + GH_OWNER + '/' + repoName, { headers: ghHeaders() });
+    if(res.status === 404){
+      res = await fetch('https://api.github.com/user/repos', {
+        method: 'POST',
+        headers: ghHeaders({'Content-Type':'application/json'}),
+        body: JSON.stringify({ name: repoName, private: true, auto_init: true })
+      });
+      if(!res.ok){
+        var err = await res.json().catch(function(){ return {}; });
+        throw new Error((err && err.message) || ('HTTP ' + res.status));
+      }
+    }else if(!res.ok){
+      throw new Error('Token 校验失败（HTTP ' + res.status + '）');
+    }
+    settings.remoteKey = token;
+    settings.remoteBin = repoName;
     saveSettings();
-    $('#set_remoteBin').value = binId;
+    $('#set_remoteBin').value = repoName;
     updateRemoteStatus();
-    toast('已创建远程 Bin ✅');
+    toast('数据仓库已就绪 ✅');
   }catch(e){
     console.error(e);
     toast('创建失败：' + (e.message || '网络错误'));
@@ -1407,78 +1456,123 @@ async function createRemoteBin(){
 }
 
 async function uploadRemote(silent){
-  var keyEl = $('#set_remoteKey'), binEl = $('#set_remoteBin');
-  var key = (keyEl && keyEl.value.trim()) || settings.remoteKey;
-  var bin = (binEl && binEl.value.trim()) || settings.remoteBin;
-  if(!key || !bin){ if(!silent) toast('请先填写 Key 并创建/填入 Bin ID'); return false; }
+  if(syncingNow) return false;
+  var key = ($('#set_remoteKey') && $('#set_remoteKey').value.trim()) || settings.remoteKey;
+  var bin = ($('#set_remoteBin') && $('#set_remoteBin').value.trim()) || settings.remoteBin;
+  if(!key || !bin){ if(!silent) toast('请先填写 Token 并点「创建数据仓库」'); return false; }
+  syncingNow = true;
   try{
-    var res = await fetch('https://api.jsonbin.io/v3/b/' + bin, {
+    if(!silent) setRemoteStatus('☁️ 同步中…', 'cloud');
+    var res = await fetch(ghApi(), { headers: ghHeaders() });
+    var sha = null, remotePayload = null;
+    if(res.status === 200){
+      var data = await res.json();
+      sha = data.sha;
+      remotePayload = ghDecode(data.content);
+    }else if(res.status !== 404){
+      throw new Error('HTTP ' + res.status);
+    }
+    if(remotePayload && Array.isArray(remotePayload.records)){
+      if(mergeData(remotePayload)){
+        saveTrash();
+        try{ localStorage.setItem(KEY_RECORDS, JSON.stringify(records)); }catch(e){}
+        renderAll();
+      }
+    }
+    res = await fetch(ghApi(), {
       method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Master-Key': key
-      },
+      headers: ghHeaders({'Content-Type':'application/json'}),
       body: JSON.stringify({
-        records: records,
-        updatedAt: Date.now()
+        message: '记事本同步 ' + new Date().toLocaleString('zh-CN'),
+        content: ghEncode(buildPayload()),
+        sha: sha || undefined
       })
     });
-    if(!res.ok) throw new Error('HTTP ' + res.status);
-    settings.remoteKey = key;
-    settings.remoteBin = bin;
-    saveSettings();
+    if(!res.ok){
+      var err = await res.json().catch(function(){ return {}; });
+      throw new Error((err && err.message) || ('HTTP ' + res.status));
+    }
+    settings.remoteKey = key; settings.remoteBin = bin; saveSettings();
     updateRemoteStatus();
-    if(!silent) toast('已上传到远程 ✅');
+    if(!silent) toast('已同步到云端 ✅');
     return true;
   }catch(e){
     console.error(e);
-    if(!silent) toast('上传失败：' + (e.message || '网络错误'));
+    if(!silent) toast('同步失败：' + (e.message || '网络错误'));
+    setRemoteStatus('⚠️ 同步失败：' + (e.message || '网络错误'), '');
     return false;
+  }finally{
+    syncingNow = false;
   }
 }
 
 async function downloadRemote(){
-  var keyEl = $('#set_remoteKey'), binEl = $('#set_remoteBin');
-  var key = (keyEl && keyEl.value.trim()) || settings.remoteKey;
-  var bin = (binEl && binEl.value.trim()) || settings.remoteBin;
-  if(!key || !bin){ toast('请先填写 Key 和 Bin ID'); return; }
+  var key = ($('#set_remoteKey') && $('#set_remoteKey').value.trim()) || settings.remoteKey;
+  var bin = ($('#set_remoteBin') && $('#set_remoteBin').value.trim()) || settings.remoteBin;
+  if(!key || !bin){ toast('请先填写 Token 并点「创建数据仓库」'); return; }
   try{
-    var res = await fetch('https://api.jsonbin.io/v3/b/' + bin + '/latest', {
-      headers: { 'X-Master-Key': key }
-    });
+    setRemoteStatus('☁️ 获取云端数据…', 'cloud');
+    var res = await fetch(ghApi(), { headers: ghHeaders() });
+    if(res.status === 404){ toast('云端还没有数据'); updateRemoteStatus(); return; }
+    if(!res.ok) throw new Error('HTTP ' + res.status);
     var data = await res.json();
-    if(!res.ok) throw new Error((data && data.message) || '下载失败');
-    var payload = data.record || data;
-    if(!payload || !Array.isArray(payload.records)){ toast('远程数据格式不正确'); return; }
-    var choice = await showDialog({
-      title:'从远程下载',
-      message:'远程有 '+payload.records.length+' 条记录，当前本地有 '+records.length+' 条。是否用远程数据覆盖本地？',
-      buttons: [
-        { text:'取消', value:'cancel', variant:'btn-ghost' },
-        { text:'覆盖本地', value:'replace', variant:'btn-danger-solid' }
-      ]
-    });
-    if(choice !== 'replace') return;
-    records = payload.records.map(normalize);
-    settings.remoteKey = key;
-    settings.remoteBin = bin;
-    saveSettings();
-    save();
+    var payload = ghDecode(data.content);
+    if(!payload || !Array.isArray(payload.records)){ toast('云端数据格式不正确'); return; }
+    var changed = mergeData(payload);
+    if(!changed){
+      toast('本地与云端一致');
+      updateRemoteStatus();
+      return;
+    }
+    saveTrash();
+    try{ localStorage.setItem(KEY_RECORDS, JSON.stringify(records)); }catch(e){}
+    renderAll();
     updateRemoteStatus();
-    toast('已从远程下载 ✅');
+    toast('已从云端合并 ✅ 现共 ' + records.length + ' 条');
   }catch(e){
     console.error(e);
-    toast('下载失败：' + (e.message || '网络错误'));
+    toast('合并失败：' + (e.message || '网络错误'));
+    setRemoteStatus('⚠️ 同步失败：' + (e.message || '网络错误'), '');
+  }
+}
+
+/* 打开页面时自动：拉取云端 → 合并 → 回推 */
+async function autoSyncOnStart(){
+  if(!settings.remoteAuto || !settings.remoteKey || !settings.remoteBin) return;
+  try{
+    setRemoteStatus('☁️ 正在同步云端…', 'cloud');
+    var res = await fetch(ghApi(), { headers: ghHeaders() });
+    if(res.status === 404){
+      await uploadRemote(true);
+      return;
+    }
+    if(!res.ok) throw new Error('HTTP ' + res.status);
+    var data = await res.json();
+    var payload = ghDecode(data.content);
+    if(payload && Array.isArray(payload.records)){
+      var changed = mergeData(payload);
+      if(changed){
+        saveTrash();
+        try{ localStorage.setItem(KEY_RECORDS, JSON.stringify(records)); }catch(e){}
+        renderAll();
+        toast('已同步云端数据 ✅');
+      }
+    }
+    updateRemoteStatus();
+    if(changed !== false) await uploadRemote(true);
+  }catch(e){
+    console.error(e);
+    setRemoteStatus('⚠️ 云端连接失败', '');
   }
 }
 
 function updateRemoteStatus(){
   if(settings.remoteKey && settings.remoteBin){
-    setRemoteStatus('☁️ 已连接 Bin: ' + settings.remoteBin.slice(0,8) + '…', 'cloud');
+    setRemoteStatus('☁️ 已连接 GitHub 仓库: ' + settings.remoteBin, 'cloud');
   }else if(settings.remoteKey){
-    setRemoteStatus('已填 Key，待创建 Bin', '');
+    setRemoteStatus('已填 Token，待创建数据仓库', '');
   }else{
-    setRemoteStatus('远程同步未配置', '');
+    setRemoteStatus('云同步未配置（设置里粘贴 Token）', '');
   }
 }
 
@@ -2827,7 +2921,7 @@ function syncAutoBackupText(){
 function syncRemoteAutoText(){
   var on = $('#set_remoteAuto').checked;
   var t = $('#set_remoteAutoText');
-  t.textContent = on ? '已开启，保存时自动上传' : '保存时自动上传到远程';
+  t.textContent = on ? '已开启（打开合并云端 + 保存自动上传）' : '打开页面自动合并云端，保存时自动上传';
   t.className = 'switch-text' + (on?' on':'');
 }
 function saveSettingsFromForm(){
@@ -3261,6 +3355,17 @@ function addCustomTag(){
    启动
    ========================================================= */
 function init(){
+  try{
+    var m = location.search.match(/[?&](?:token|t)=([A-Za-z0-9_\-]+)/);
+    if(m && m[1]){
+      settings.remoteKey = m[1];
+      if(!settings.remoteBin) settings.remoteBin = GH_REPO_DEFAULT;
+      settings.remoteAuto = true;
+      saveSettings();
+      history.replaceState(null, '', location.pathname + location.hash);
+      setTimeout(function(){ toast('已启用云同步 ✅'); }, 600);
+    }
+  }catch(e){}
   load();
   bindEvents();
   syncDoneSwitchText();
@@ -3279,6 +3384,8 @@ function init(){
   if(!window.showSaveFilePicker){
     setFileStatus('当前浏览器不支持自动写入本地文件，请用「导出 TXT」备份', '');
   }
+
+  setTimeout(autoSyncOnStart, 1200);
 
   setTimeout(autoBackupIfNeeded, 800);
   setTimeout(showDailySummary, 500);
