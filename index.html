@@ -1021,6 +1021,7 @@ tbody tr.overdue td:first-child{box-shadow:inset 3px 0 0 #e04b4b}
 'use strict';
 
 var KEY_RECORDS = 'mtd_promo_notebook_v1';
+var KEY_PURGED = 'mtd_promo_purged_v1';
 var KEY_TRASH = 'mtd_promo_trash_v1';
 var KEY_LOGS = 'mtd_promo_logs_v1';
 var KEY_SETTINGS = 'mtd_promo_settings_v1';
@@ -1085,6 +1086,7 @@ function toast(msg){
    数据层
    ========================================================= */
 var records = [];
+var purged = [];   // 彻底删除名单: [{id,at}], 防止其他设备把已彻底删除的回收站条目再同步回来
 var trash = [];
 var logs = [];
 var settings = Object.assign({}, DEFAULT_SETTINGS);
@@ -1138,6 +1140,13 @@ function load(){
   }catch(e){ trash = []; }
 
   try{
+    var praw = localStorage.getItem(KEY_PURGED);
+    var parr = praw ? JSON.parse(praw) : [];
+    purged = Array.isArray(parr) ? parr : [];
+    if(purged.length > 500) purged = purged.slice(-500);
+  }catch(e){ purged = []; }
+
+  try{
     var lraw = localStorage.getItem(KEY_LOGS);
     var larr = lraw ? JSON.parse(lraw) : [];
     logs = Array.isArray(larr) ? larr : [];
@@ -1162,6 +1171,15 @@ function saveRecords(){
   renderAll();
 }
 function saveTrash(){ try{ localStorage.setItem(KEY_TRASH, JSON.stringify(trash)); }catch(e){} }
+function savePurged(){ try{ localStorage.setItem(KEY_PURGED, JSON.stringify(purged.slice(-500))); }catch(e){} }
+function markPurged(ids){
+  var at = Date.now(), set = {};
+  purged.forEach(function(p){ set[p.id] = p.at; });
+  (ids||[]).forEach(function(id){ set[id] = at; });
+  purged = Object.keys(set).map(function(id){ return {id:id, at:set[id]}; });
+  if(purged.length > 500) purged = purged.slice(-500);
+  savePurged();
+}
 function saveLogs(){ try{ localStorage.setItem(KEY_LOGS, JSON.stringify(logs.slice(0,200))); }catch(e){} }
 function saveSettings(){ try{ localStorage.setItem(KEY_SETTINGS, JSON.stringify(settings)); }catch(e){} }
 
@@ -1414,7 +1432,7 @@ function ghDecode(b64){
   catch(e){ return null; }
 }
 function buildPayload(){
-  return { records: records, trash: trash, updatedAt: Date.now() };
+  return { records: records, trash: trash, purged: purged.slice(-500), updatedAt: Date.now() };
 }
 /* 合并云端数据到本地：并集；同一条以「已结算」的为准；对方删除的本地也删除；
    自动记录(auto)：云端 syncedAt 较新则采纳（网页版跑码数据）；
@@ -1422,11 +1440,29 @@ function buildPayload(){
 function mergeData(payload){
   var changed = false;
   try{
+    // 1) 合并彻底删除名单(并集, 双向): 已彻底删除的条目在任何设备都不再复活
+    var remotePurged = Array.isArray(payload.purged) ? payload.purged : [];
+    var purgedMap = {};
+    purged.forEach(function(p){ if(p&&p.id) purgedMap[p.id]=p.at||0; });
+    remotePurged.forEach(function(p){
+      if(p && p.id && purgedMap[p.id]===undefined){ purgedMap[p.id]=p.at||0; changed=true; }
+      else if(p && p.id && (p.at||0) > (purgedMap[p.id]||0)){ purgedMap[p.id]=p.at||0; }
+    });
+    purged = Object.keys(purgedMap).map(function(id){ return {id:id, at:purgedMap[id]}; });
+    if(purged.length > 500) purged = purged.slice(-500);
+    savePurged();
+
+    // 2) 彻底删除名单生效: 本地回收站和记录里对应条目直接清掉(自动记录在删除后新推的除外)
+    var beforeT = trash.length;
+    trash = trash.filter(function(t){ return !purgedMap[t.id]; });
+    if(trash.length !== beforeT){ changed = true; saveTrash(); }
+
+    // 3) 合并云端回收站(跳过已彻底删除的)
     var remoteTrash = Array.isArray(payload.trash) ? payload.trash : [];
     var trashIds = {};
     trash.forEach(function(t){ trashIds[t.id] = true; });
     remoteTrash.forEach(function(rt){
-      if(rt && rt.id && !trashIds[rt.id]){ trash.push(rt); trashIds[rt.id] = true; changed = true; }
+      if(rt && rt.id && !purgedMap[rt.id] && !trashIds[rt.id]){ trash.push(rt); trashIds[rt.id] = true; changed = true; }
     });
 
     var localById = {};
@@ -1459,6 +1495,10 @@ function mergeData(payload){
     var trashById = {};
     trash.forEach(function(t){ trashById[t.id] = t; });
     records = records.filter(function(r){
+      // 已彻底删除的: 除非是删除之后app新推的自动记录, 否则一律清掉
+      if(purgedMap[r.id] !== undefined){
+        return !!(r.auto && (r.syncedAt||0) > (purgedMap[r.id]||0));
+      }
       if(!trashIds[r.id]) return true;
       var td = trashById[r.id];
       // 自动记录且推送时间晚于删除时间 → 是删除后app新推的, 保留(否则同日同号ID固定会被回收站永远挡掉)
@@ -2869,8 +2909,10 @@ function purgeTrash(id){
   confirmBox({ title:'彻底删除', message:'彻底删除后无法恢复，确定吗？', okText:'彻底删除', danger:true })
   .then(function(ok){
     if(!ok) return;
+    markPurged([id]);                       // 记入彻底删除名单(同步到云端, 其他设备不再复活)
     trash = trash.filter(function(t){ return t.id!==id; });
     saveTrash(); renderTrash(); renderTrashCount();
+    save();                                  // 触发云同步, 让删除名单立刻上传
     toast('已彻底删除');
   });
 }
@@ -2882,7 +2924,9 @@ function emptyTrash(){
     okText:'确认清空', danger:true
   }).then(function(ok){
     if(!ok) return;
+    markPurged(trash.map(function(t){ return t.id; }));   // 清空回收站也记入彻底删除名单
     trash = []; saveTrash(); renderTrash(); renderTrashCount();
+    save();                                               // 触发云同步
     toast('回收站已清空');
   });
 }
