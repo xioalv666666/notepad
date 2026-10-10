@@ -392,6 +392,16 @@ tbody tr.overdue td:first-child{box-shadow:inset 3px 0 0 #e04b4b}
 .footer kbd{font-family:ui-monospace,Menlo,Consolas,monospace;background:#f4f6fb;color:#7c8698;
   padding:1px 6px;border-radius:5px;font-size:11px;font-weight:700;border:1px solid #e6ebf5}
 
+/* 批量删除勾选 */
+#recTable .ck-col{width:34px;text-align:center}
+#recTable:not(.batching) .ck-col{display:none}
+#btnBatchDel.on{background:#ef4444;color:#fff;border-color:#ef4444}
+#batchBar{display:none;position:sticky;bottom:10px;z-index:60;align-items:center;gap:10px;flex-wrap:wrap;
+  background:#1e293b;color:#fff;border-radius:12px;padding:10px 14px;margin-top:10px;
+  box-shadow:0 6px 24px rgba(0,0,0,.25)}
+#batchBar .binfo{font-size:13px;font-weight:700}
+#batchBar.show{display:flex}
+
 /* 手机端表格卡片化 */
 @media(max-width:640px){
   .table-wrap{border:none;overflow:visible;background:transparent}
@@ -667,14 +677,16 @@ tbody tr.overdue td:first-child{box-shadow:inset 3px 0 0 #e04b4b}
     <h2>推广记录</h2>
     <div style="display:flex;gap:8px;align-items:center">
       <span class="tip" id="countTip"></span>
+      <button class="btn btn-ghost btn-sm" id="btnBatchDel">☑ 批量删除</button>
       <button class="btn btn-ghost btn-sm" id="btnTrash">🗑 回收站 <span id="trashCount"></span></button>
     </div>
   </div>
 
   <div class="table-wrap">
-    <table>
+    <table id="recTable">
       <thead>
         <tr>
+          <th class="ck-col"><input type="checkbox" id="ckAll" title="全选/取消全选" style="transform:scale(1.15);cursor:pointer"></th>
           <th>记录日期</th>
           <th>客户微信名称</th>
           <th>邀请码 / 手机号</th>
@@ -689,6 +701,14 @@ tbody tr.overdue td:first-child{box-shadow:inset 3px 0 0 #e04b4b}
       </thead>
       <tbody id="tbody"></tbody>
     </table>
+  </div>
+
+  <!-- 批量删除操作条 -->
+  <div id="batchBar">
+    <span class="binfo">已选 <span id="batchCount">0</span> 条</span>
+    <button class="btn btn-ghost btn-sm" id="btnBatchAll">全选 / 取消</button>
+    <button class="btn btn-danger btn-sm" id="btnDelChecked">🗑 删除选中</button>
+    <button class="btn btn-ghost btn-sm" id="btnBatchCancel">退出批量</button>
   </div>
 
   <!-- 表格下方金额汇总 -->
@@ -1071,6 +1091,8 @@ var settings = Object.assign({}, DEFAULT_SETTINGS);
 var localFileHandle = null;
 var searchTerm = '';
 var remoteSyncTimer = null;
+var checkedIds = {};   // 批量删除: 已勾选的记录 id
+var batching = false;  // 是否处于批量删除模式
 
 function normalize(r){
   r = r||{};
@@ -1818,7 +1840,7 @@ function renderTable(){
   var list = getFiltered();
 
   if(!list.length){
-    tbody.innerHTML = '<tr><td colspan="10" class="empty">'+(searchTerm?'没有匹配的记录':'当前筛选条件下暂无记录 ✨')+'</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="11" class="empty">'+(searchTerm?'没有匹配的记录':'当前筛选条件下暂无记录 ✨')+'</td></tr>';
     $('#countTip').textContent = '';
     renderTableSummary([]);
     return;
@@ -1842,6 +1864,7 @@ function renderTable(){
     var settleSub = r.settled && r.settledDate ? '<span class="s">结算于 '+esc(r.settledDate)+'</span>' : '';
 
     return '<tr class="'+(overdue?'overdue':'')+'">'+
+      '<td class="ck-col" data-label="选择"><input type="checkbox" class="row-ck" data-id="'+esc(r.id)+'"'+(checkedIds[r.id]?' checked':'')+'></td>'+
       '<td class="num" data-label="记录日期"><div class="date-cell"><span class="d">'+esc(r.date)+overdueBadge+'</span>'+settleSub+'</div></td>'+
       '<td data-label="客户微信名称"><b>'+esc(r.name)+'</b></td>'+
       '<td data-label="邀请码 / 手机号">'+esc(r.code)+'</td>'+
@@ -2729,6 +2752,77 @@ function delRecord(id){
     toast('已移入回收站');
   });
 }
+/* ===== 批量删除 ===== */
+function setBatching(on){
+  batching = !!on;
+  checkedIds = {};
+  var t = $('#recTable');
+  if(t) t.classList.toggle('batching', batching);
+  var btn = $('#btnBatchDel');
+  if(btn) btn.classList.toggle('on', batching);
+  if(btn) btn.textContent = batching ? '✕ 退出批量' : '☑ 批量删除';
+  updateBatchBar();
+  renderTable();
+}
+function updateBatchBar(){
+  var bar = $('#batchBar');
+  if(!bar) return;
+  var ids = Object.keys(checkedIds).filter(function(k){ return checkedIds[k]; });
+  bar.classList.toggle('show', batching);
+  var c = $('#batchCount');
+  if(c) c.textContent = ids.length;
+  // 表头复选框与行勾选状态同步
+  var list = getFiltered();
+  var sel = 0;
+  list.forEach(function(r){ if(checkedIds[r.id]) sel++; });
+  var allOn = list.length>0 && sel===list.length;
+  var ca = $('#ckAll');
+  if(ca){
+    ca.checked = allOn;
+    ca.indeterminate = sel>0 && !allOn;
+  }
+  var ba = $('#btnBatchAll');
+  if(ba) ba.textContent = allOn ? '☐ 取消全选' : '☑ 全选';
+  var del = $('#btnDelChecked');
+  if(del) del.disabled = ids.length===0;
+}
+function toggleCheck(id, on){
+  if(on) checkedIds[id] = true; else delete checkedIds[id];
+  updateBatchBar();
+}
+function checkAllRows(on){
+  if(on){
+    getFiltered().forEach(function(r){ checkedIds[r.id] = true; });
+  }else{
+    checkedIds = {};
+  }
+  renderTable();
+  updateBatchBar();
+}
+function delChecked(){
+  var ids = Object.keys(checkedIds).filter(function(k){ return checkedIds[k]; });
+  if(!ids.length){ toast('请先勾选要删除的记录'); return; }
+  var setId = {};
+  ids.forEach(function(id){ setId[id] = true; });
+  confirmBox({
+    title:'批量删除',
+    message:'确定要删除已勾选的 '+ids.length+' 条记录吗？删除后会进入回收站，30 天内可恢复。',
+    okText:'删除 '+ids.length+' 条', danger:true
+  }).then(function(ok){
+    if(!ok) return;
+    var now = Date.now();
+    var del = records.filter(function(r){ return setId[r.id]; });
+    del.forEach(function(r){ trash.unshift(Object.assign({}, r, {deletedAt: now})); });
+    if(trash.length>500) trash = trash.slice(0,500);
+    records = records.filter(function(r){ return !setId[r.id]; });
+    addLog('批量删除', '共 '+del.length+' 条');
+    saveTrash();
+    checkedIds = {};
+    save();
+    toast('已删除 '+del.length+' 条，可在回收站恢复');
+    updateBatchBar();
+  });
+}
 function renderTrash(){
   var el = $('#trashBody');
   if(!trash.length){
@@ -3232,6 +3326,8 @@ function bindEvents(){
   });
 
   $('#tbody').addEventListener('click', function(e){
+    var ck = e.target.closest('input.row-ck');
+    if(ck){ toggleCheck(ck.getAttribute('data-id'), ck.checked); return; }
     var btn = e.target.closest('button[data-act]');
     if(!btn) return;
     var id = btn.getAttribute('data-id');
@@ -3241,6 +3337,20 @@ function bindEvents(){
     else if(act==='toggle') toggleSettled(id);
     else if(act==='toggleDone') toggleDone(id);
   });
+  $('#tbody').addEventListener('change', function(e){
+    var ck = e.target.closest('input.row-ck');
+    if(ck) toggleCheck(ck.getAttribute('data-id'), ck.checked);
+  });
+  $('#btnBatchDel').addEventListener('click', function(){ setBatching(!batching); });
+  $('#ckAll').addEventListener('change', function(){ checkAllRows(this.checked); });
+  $('#btnBatchAll').addEventListener('click', function(){
+    var list = getFiltered();
+    var sel = 0;
+    list.forEach(function(r){ if(checkedIds[r.id]) sel++; });
+    checkAllRows(!(list.length>0 && sel===list.length));
+  });
+  $('#btnDelChecked').addEventListener('click', delChecked);
+  $('#btnBatchCancel').addEventListener('click', function(){ setBatching(false); });
 
   $$('.tab').forEach(function(btn){
     btn.addEventListener('click', function(){ switchTab(btn.getAttribute('data-tab')); });
