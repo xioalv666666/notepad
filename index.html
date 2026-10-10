@@ -1639,10 +1639,10 @@ async function downloadRemote(){
 }
 
 /* 打开页面时自动：拉取云端 → 合并 → 回推 */
-async function autoSyncOnStart(){
+async function autoSyncOnStart(silent){
   if(!settings.remoteAuto || !settings.remoteKey || !settings.remoteBin) return;
   try{
-    setRemoteStatus('☁️ 正在同步云端…', 'cloud');
+    if(!silent) setRemoteStatus('☁️ 正在同步云端…', 'cloud');
     var res = await fetch(ghApi(), { headers: ghHeaders() });
     if(res.status === 404){
       await uploadRemote(true);
@@ -1651,22 +1651,35 @@ async function autoSyncOnStart(){
     if(!res.ok) throw new Error('HTTP ' + res.status);
     var data = await res.json();
     var payload = ghDecode(data.content);
+    var changed = false;
     if(payload && Array.isArray(payload.records)){
-      var changed = mergeData(payload);
+      changed = mergeData(payload);
       if(changed){
         saveTrash();
         try{ localStorage.setItem(KEY_RECORDS, JSON.stringify(records)); }catch(e){}
         renderAll();
-        toast('已同步云端数据 ✅');
+        if(!silent) toast('已同步云端数据 ✅');
       }
     }
-    updateRemoteStatus();
-    if(changed !== false) await uploadRemote(true);
+    if(!silent) updateRemoteStatus();
+    if(changed) await uploadRemote(true);
   }catch(e){
     console.error(e);
-    setRemoteStatus('⚠️ 云端连接失败', '');
+    if(!silent) setRemoteStatus('⚠️ 云端连接失败', '');
   }
 }
+
+/* 每30秒自动同步云端(页面可见时): 跑码新录入不用手动刷新就自动出现 */
+var autoSyncBusy = false;
+setInterval(function(){
+  try{
+    if(autoSyncBusy || syncingNow) return;
+    if(document.visibilityState !== 'visible') return;
+    if(!settings.remoteAuto || !settings.remoteKey || !settings.remoteBin) return;
+    autoSyncBusy = true;
+    autoSyncOnStart(true).finally(function(){ autoSyncBusy = false; });
+  }catch(e){ autoSyncBusy = false; }
+}, 30000);
 
 function updateRemoteStatus(){
   if(settings.remoteKey && settings.remoteBin){
