@@ -1094,7 +1094,9 @@ function normalize(r){
     settledDate: settled ? settledDate : '',
     remark: String(r.remark||''),
     tags: Array.isArray(r.tags) ? r.tags.filter(function(t){ return t && typeof t === 'string'; }).slice(0,6) : [],
-    createdAt: Number(r.createdAt) || Date.now()
+    createdAt: Number(r.createdAt) || Date.now(),
+    auto: !!r.auto,
+    syncedAt: Number(r.syncedAt) || 0
   };
 }
 
@@ -1392,7 +1394,9 @@ function ghDecode(b64){
 function buildPayload(){
   return { records: records, trash: trash, updatedAt: Date.now() };
 }
-/* 合并云端数据到本地：并集；同一条以「已结算」的为准；对方删除的本地也删除 */
+/* 合并云端数据到本地：并集；同一条以「已结算」的为准；对方删除的本地也删除；
+   自动记录(auto)：云端 syncedAt 较新则采纳（网页版跑码数据）；
+   本地已人工编辑(auto=false)的记录永不被自动数据覆盖 */
 function mergeData(payload){
   var changed = false;
   try{
@@ -1409,11 +1413,23 @@ function mergeData(payload){
       rr = normalize(rr);
       var lr = localById[rr.id];
       if(!lr){ records.push(rr); localById[rr.id] = rr; changed = true; }
-      else if(rr.settled && !lr.settled){
-        for(var i=0;i<records.length;i++){
-          if(records[i].id===rr.id){ records[i] = rr; break; }
+      else if(lr.id === rr.id){
+        var takeRemote = false;
+        if(lr.auto && rr.auto){
+          takeRemote = (rr.syncedAt||0) > (lr.syncedAt||0);      // 都是自动数据: 云端较新者赢
+        }else if(!lr.auto && rr.auto){
+          takeRemote = false;                                     // 本地已人工编辑: 保护
+        }else if(lr.auto && !rr.auto){
+          takeRemote = true;                                      // 其他设备已人工编辑: 采纳
+        }else if(rr.settled && !lr.settled){
+          takeRemote = true;                                      // 手动记录: 以已结算的为准
         }
-        changed = true;
+        if(takeRemote){
+          for(var i=0;i<records.length;i++){
+            if(records[i].id===rr.id){ records[i] = rr; break; }
+          }
+          changed = true;
+        }
       }
     });
 
