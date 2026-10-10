@@ -1573,6 +1573,23 @@ async function uploadRemote(silent){
         sha: sha || undefined
       })
     });
+    if(!res.ok && res.status === 409){
+      // 冲突(其他页面/设备刚写过): 重取云端合并后再试一次, 保证本机删除/修改不丢
+      var res2 = await fetch(ghApi(), { headers: ghHeaders() });
+      if(res2.status === 200){
+        var d2 = await res2.json();
+        mergeData(ghDecode(d2.content));
+        res = await fetch(ghApi(), {
+          method: 'PUT',
+          headers: ghHeaders({'Content-Type':'application/json'}),
+          body: JSON.stringify({
+            message: '记事本同步 ' + new Date().toLocaleString('zh-CN'),
+            content: ghEncode(buildPayload()),
+            sha: d2.sha
+          })
+        });
+      }
+    }
     if(!res.ok){
       var err = await res.json().catch(function(){ return {}; });
       throw new Error((err && err.message) || ('HTTP ' + res.status));
@@ -2792,6 +2809,7 @@ function delRecord(id){
     if(!ok) return;
     trash.unshift(Object.assign({}, r, {deletedAt: Date.now()}));
     if(trash.length>500) trash = trash.slice(0,500);
+    markPurged([id]);   // 删除名单: 防止其他页面的旧状态把这条记录再传回来
     records = records.filter(function(x){ return x.id!==id; });
     saveTrash();
     addLog('删除', r.name+' · ￥'+money(r.total));
@@ -2861,6 +2879,7 @@ function delChecked(){
     var del = records.filter(function(r){ return setId[r.id]; });
     del.forEach(function(r){ trash.unshift(Object.assign({}, r, {deletedAt: now})); });
     if(trash.length>500) trash = trash.slice(0,500);
+    markPurged(ids);   // 删除名单: 防止其他页面的旧状态把这些记录再传回来
     records = records.filter(function(r){ return !setId[r.id]; });
     addLog('批量删除', '共 '+del.length+' 条');
     saveTrash();
@@ -2897,6 +2916,8 @@ function restoreTrash(id){
   if(idx<0) return;
   var t = trash[idx];
   delete t.deletedAt;
+  purged = purged.filter(function(p){ return p.id!==id; });   // 移出删除名单, 恢复的记录不再被同步清掉
+  savePurged();
   records.push(normalize(t));
   trash.splice(idx,1);
   saveTrash();
