@@ -1456,7 +1456,14 @@ function mergeData(payload){
     });
 
     var before = records.length;
-    records = records.filter(function(r){ return !trashIds[r.id]; });
+    var trashById = {};
+    trash.forEach(function(t){ trashById[t.id] = t; });
+    records = records.filter(function(r){
+      if(!trashIds[r.id]) return true;
+      var td = trashById[r.id];
+      // 自动记录且推送时间晚于删除时间 → 是删除后app新推的, 保留(否则同日同号ID固定会被回收站永远挡掉)
+      return !!(r.auto && (r.syncedAt||0) > ((td&&td.deletedAt)||0));
+    });
     if(records.length !== before) changed = true;
   }catch(e){ console.error(e); }
   return changed;
