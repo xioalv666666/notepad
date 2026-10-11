@@ -1120,7 +1120,8 @@ function normalize(r){
     tags: Array.isArray(r.tags) ? r.tags.filter(function(t){ return t && typeof t === 'string'; }).slice(0,6) : [],
     createdAt: Number(r.createdAt) || Date.now(),
     auto: !!r.auto,
-    syncedAt: Number(r.syncedAt) || 0
+    syncedAt: Number(r.syncedAt) || 0,
+    userAt: Number(r.userAt) || 0
   };
 }
 
@@ -1473,18 +1474,29 @@ function mergeData(payload){
       if(!lr){ records.push(rr); localById[rr.id] = rr; changed = true; }
       else if(lr.id === rr.id){
         var takeRemote = false;
+        var keepLocalUser = false;
         if(lr.auto && rr.auto){
-          takeRemote = (rr.syncedAt||0) > (lr.syncedAt||0);      // 都是自动数据: 云端较新者赢
+          takeRemote = (rr.syncedAt||0) > (lr.syncedAt||0);      // 都是自动数据: 云端推送较新者赢(qty等)
+          // 本机在云端最后一次推送之后人工编辑过 → 采纳云端数量, 但保留本机人工字段(结算/价格/备注等)
+          if(takeRemote && (lr.userAt||0) > (rr.syncedAt||0)) keepLocalUser = true;
         }else if(!lr.auto && rr.auto){
           takeRemote = false;                                     // 本地已人工编辑: 保护
         }else if(lr.auto && !rr.auto){
           takeRemote = true;                                      // 其他设备已人工编辑: 采纳
-        }else if(rr.settled && !lr.settled){
-          takeRemote = true;                                      // 手动记录: 以已结算的为准
+        }else if(rr.settled !== lr.settled){
+          // 结算状态不一致: 以最近一次人工操作为准(不再固定"已结算的为准", 取消勾选不再被盖回)
+          takeRemote = ((rr.userAt||rr.syncedAt||0) > (lr.userAt||lr.syncedAt||0));
         }
         if(takeRemote){
+          var src = rr;
+          if(keepLocalUser){
+            src = Object.assign({}, rr, {
+              name:lr.name, price:lr.price, total:lr.total, settled:lr.settled,
+              settledDate:lr.settledDate, remark:lr.remark, tags:lr.tags, userAt:lr.userAt
+            });
+          }
           for(var i=0;i<records.length;i++){
-            if(records[i].id===rr.id){ records[i] = rr; break; }
+            if(records[i].id===rr.id){ records[i] = normalize(src); break; }
           }
           changed = true;
         }
@@ -2785,11 +2797,13 @@ function submitForm(e){
     var idx = -1;
     for(var i=0;i<records.length;i++){ if(records[i].id===editingId){ idx=i; break; } }
     if(idx>-1){
-      records[idx] = normalize({
-        id: records[idx].id, name:name, code:code, qty:qty, price:price,
+      // 保留auto/syncedAt(不丢跑码同步标记), 记userAt=人工编辑时间(合并时人工操作优先)
+      records[idx] = normalize(Object.assign({}, records[idx], {
+        name:name, code:code, qty:qty, price:price,
         date:date, done:done, settled:settled, settledDate:settledDate, remark:remark, tags:tags,
-        createdAt: records[idx].createdAt
-      });
+        createdAt: records[idx].createdAt,
+        userAt: Date.now()
+      }));
       addLog('编辑', name+' · ￥'+money(qty*price));
     }
     toast('已保存修改');
